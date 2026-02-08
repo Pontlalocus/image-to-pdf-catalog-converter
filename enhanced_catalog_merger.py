@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-PDF Catalog Merger
+Enhanced PDF Catalog Merger
 
-Merges single PDF files into a multi-page catalog with cover and back cover.
-The script searches for cover.pdf and back_cover.pdf files and arranges 
-inner pages according to user preference (by name or creation date).
+This script handles both JPG to PDF conversion and PDF merging.
+It creates a complete catalog with cover, back cover, and inner pages.
 
 Usage:
-    python pdf_catalog_merger.py
-    python pdf_catalog_merger.py -d /path/to/pdfs -o catalog.pdf
-    python pdf_catalog_merger.py -d documents -s date -o final_catalog.pdf
+    python enhanced_catalog_merger.py
+    python enhanced_catalog_merger.py -d /path/to/images -o catalog.pdf
 """
 
 import os
@@ -21,44 +19,42 @@ from datetime import datetime
 
 try:
     from PyPDF2 import PdfReader, PdfWriter
-except ImportError:
-    print("Error: PyPDF2 is required. Install with: pip install PyPDF2")
+    from PIL import Image, ImageOps
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import ImageReader
+except ImportError as e:
+    print(f"Error: Missing required library. Install with: pip install PyPDF2 Pillow reportlab")
+    print(f"Specific error: {e}")
     sys.exit(1)
 
 
-class PDFCatalogMerger:
-    """Merge PDF files into a catalog with cover and back cover."""
+class EnhancedCatalogMerger:
+    """Enhanced catalog merger that handles both JPG and PDF files."""
     
-    def __init__(self):
-        """Initialize the PDF catalog merger."""
+    def __init__(self, margin_inches: float = 0.5):
+        """Initialize the enhanced catalog merger."""
         self.cover_filename = "cover.pdf"
         self.back_cover_filename = "back_cover.pdf"
+        self.page_size = letter
+        self.page_width, self.page_height = self.page_size
+        self.margin = margin_inches * 72  # Convert inches to points
     
-    def find_cover_files(self, directory: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    def find_or_create_cover_files(self, directory: Path) -> Tuple[Optional[Path], Optional[Path]]:
         """
-        Find cover and back cover files in the directory.
-        Also creates them if they don't exist.
+        Find existing cover files or create them if they don't exist.
         
         Args:
-            directory: Directory to search for cover files
+            directory: Directory to search/create cover files
             
         Returns:
-            Tuple of (cover_path, back_cover_path) - None if not found
+            Tuple of (cover_path, back_cover_path)
         """
-        cover_path = None
-        back_cover_path = None
+        cover_path = directory / self.cover_filename
+        back_cover_path = directory / self.back_cover_filename
         
-        # Check for cover files (case insensitive)
-        for file in directory.iterdir():
-            if file.is_file() and file.suffix.lower() == '.pdf':
-                if file.name.lower() == self.cover_filename.lower():
-                    cover_path = file
-                elif file.name.lower() == self.back_cover_filename.lower():
-                    back_cover_path = file
-        
-        # Create cover if not found
-        if cover_path is None:
-            cover_path = directory / self.cover_filename
+        # Check if cover files exist
+        if not cover_path.exists():
             print("⚠ Cover file not found. Creating a simple cover...")
             if self.create_simple_cover(cover_path, "CATALOG COVER"):
                 print(f"✓ Created cover: {cover_path.name}")
@@ -67,9 +63,7 @@ class PDFCatalogMerger:
         else:
             print(f"✓ Found existing cover: {cover_path.name}")
         
-        # Create back cover if not found
-        if back_cover_path is None:
-            back_cover_path = directory / self.back_cover_filename
+        if not back_cover_path.exists():
             print("⚠ Back cover file not found. Creating a simple back cover...")
             if self.create_simple_cover(back_cover_path, "BACK COVER"):
                 print(f"✓ Created back cover: {back_cover_path.name}")
@@ -92,20 +86,15 @@ class PDFCatalogMerger:
             True if successful, False otherwise
         """
         try:
-            from reportlab.lib.pagesizes import letter
-            from reportlab.pdfgen import canvas
-            from datetime import datetime
-            
-            c = canvas.Canvas(str(output_path), pagesize=letter)
+            c = canvas.Canvas(str(output_path), pagesize=self.page_size)
             
             # Set font and size
             c.setFont("Helvetica-Bold", 48)
             
             # Calculate text position (centered)
-            page_width, page_height = letter
             text_width = c.stringWidth(title, "Helvetica-Bold", 48)
-            x = (page_width - text_width) / 2
-            y = page_height / 2
+            x = (self.page_width - text_width) / 2
+            y = self.page_height / 2
             
             # Draw title
             c.drawString(x, y, title)
@@ -114,7 +103,7 @@ class PDFCatalogMerger:
             c.setFont("Helvetica", 24)
             subtitle = f"Generated on {datetime.now().strftime('%Y-%m-%d')}"
             subtitle_width = c.stringWidth(subtitle, "Helvetica", 24)
-            subtitle_x = (page_width - subtitle_width) / 2
+            subtitle_x = (self.page_width - subtitle_width) / 2
             c.drawString(subtitle_x, y - 50, subtitle)
             
             c.save()
@@ -124,35 +113,107 @@ class PDFCatalogMerger:
             print(f"✗ Error creating cover: {e}")
             return False
     
-    def get_inner_pages(self, directory: Path, sort_by: str = "name") -> List[Path]:
+    def convert_jpg_to_pdf(self, jpg_path: Path, output_path: Path) -> bool:
         """
-        Get all PDF files excluding cover and back cover.
+        Convert a JPG image to a letter-sized PDF.
         
         Args:
-            directory: Directory to search for PDF files
+            jpg_path: Path to the JPG file
+            output_path: Path for the output PDF file
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Open and process the image
+            img = Image.open(jpg_path)
+            
+            # Convert to RGB if necessary
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Auto-orient based on EXIF data
+            img = ImageOps.exif_transpose(img)
+            
+            # Calculate optimal size for the PDF
+            usable_width = self.page_width - (2 * self.margin)
+            usable_height = self.page_height - (2 * self.margin)
+            
+            img_aspect = img.width / img.height
+            page_aspect = usable_width / usable_height
+            
+            if img_aspect > page_aspect:
+                pdf_width = usable_width
+                pdf_height = usable_width / img_aspect
+            else:
+                pdf_height = usable_height
+                pdf_width = usable_height * img_aspect
+            
+            # Calculate position to center the image
+            x = self.margin + (usable_width - pdf_width) / 2
+            y = self.margin + (usable_height - pdf_height) / 2
+            
+            # Create PDF
+            c = canvas.Canvas(str(output_path), pagesize=self.page_size)
+            img_reader = ImageReader(img)
+            c.drawImage(img_reader, x, y, pdf_width, pdf_height)
+            c.save()
+            
+            return True
+            
+        except Exception as e:
+            print(f"✗ Error converting {jpg_path.name}: {e}")
+            return False
+    
+    def get_all_files(self, directory: Path, sort_by: str = "name") -> List[Path]:
+        """
+        Get all image and PDF files, converting JPGs to PDFs as needed.
+        
+        Args:
+            directory: Directory to search for files
             sort_by: Sort method - "name" or "date"
             
         Returns:
-            List of PDF file paths sorted according to specified method
+            List of PDF file paths
         """
-        pdf_files = []
+        all_files = []
+        temp_dir = directory / "_temp_pdfs"
+        temp_dir.mkdir(exist_ok=True)
         
-        # Find all PDF files except cover and back cover
+        # Process all files
         for file in directory.iterdir():
-            if file.is_file() and file.suffix.lower() == '.pdf':
-                if (file.name.lower() != self.cover_filename.lower() and 
-                    file.name.lower() != self.back_cover_filename.lower()):
-                    pdf_files.append(file)
+            if not file.is_file():
+                continue
+            
+            # Skip cover and back cover files
+            if (file.name.lower() == self.cover_filename.lower() or 
+                file.name.lower() == self.back_cover_filename.lower()):
+                continue
+            
+            # Skip temp directory
+            if file.name == "_temp_pdfs":
+                continue
+            
+            if file.suffix.lower() in ['.jpg', '.jpeg']:
+                # Convert JPG to PDF
+                pdf_path = temp_dir / f"{file.stem}.pdf"
+                if self.convert_jpg_to_pdf(file, pdf_path):
+                    all_files.append(pdf_path)
+                    print(f"✓ Converted: {file.name} -> PDF")
+                else:
+                    print(f"✗ Failed to convert: {file.name}")
+                    
+            elif file.suffix.lower() == '.pdf':
+                # Use existing PDF
+                all_files.append(file)
         
         # Sort files
         if sort_by.lower() == "name":
-            pdf_files.sort(key=lambda x: x.name.lower())
+            all_files.sort(key=lambda x: x.name.lower())
         elif sort_by.lower() == "date":
-            pdf_files.sort(key=lambda x: x.stat().st_ctime)
-        else:
-            raise ValueError(f"Invalid sort method: {sort_by}. Use 'name' or 'date'.")
+            all_files.sort(key=lambda x: x.stat().st_ctime)
         
-        return pdf_files
+        return all_files
     
     def merge_pdfs(self, pdf_paths: List[Path], output_path: Path) -> bool:
         """
@@ -172,7 +233,7 @@ class PDFCatalogMerger:
                 try:
                     reader = PdfReader(str(pdf_path))
                     
-                    # Validate that the PDF has pages
+                    # Validate that PDF has pages
                     if len(reader.pages) == 0:
                         print(f"⚠ Warning: {pdf_path.name} has no pages, skipping")
                         continue
@@ -182,19 +243,19 @@ class PDFCatalogMerger:
                     print(f"✓ Added: {pdf_path.name} ({len(reader.pages)} pages)")
                 except Exception as e:
                     print(f"✗ Error reading {pdf_path.name}: {e}")
-                    continue  # Continue with other files instead of returning False
+                    continue
             
             # Check if any pages were added
             if len(writer.pages) == 0:
-                print("✗ No valid pages were added to the PDF")
+                print("✗ No valid pages were added to PDF")
                 return False
             
-            # Write the merged PDF with proper error handling
+            # Write merged PDF
             try:
                 with open(output_path, 'wb') as output_file:
                     writer.write(output_file)
                 
-                # Verify the file was created and has content
+                # Verify file was created and has content
                 if output_path.exists() and output_path.stat().st_size > 0:
                     print(f"✓ PDF written successfully: {output_path}")
                     print(f"✓ Total pages in merged PDF: {len(writer.pages)}")
@@ -214,40 +275,30 @@ class PDFCatalogMerger:
     def create_catalog(self, input_directory: Path, output_file: str, 
                       sort_by: str = "name") -> bool:
         """
-        Create a catalog by merging PDF files with cover and back cover.
+        Create a complete catalog by converting images and merging PDFs.
         
         Args:
-            input_directory: Directory containing PDF files
+            input_directory: Directory containing image/PDF files
             output_file: Output PDF filename
             sort_by: Sort method for inner pages ("name" or "date")
             
         Returns:
             True if successful, False otherwise
         """
-        print(f"Creating catalog from: {input_directory}")
+        print(f"Creating enhanced catalog from: {input_directory}")
         print(f"Sorting inner pages by: {sort_by}")
         print("-" * 50)
         
-        # Find cover files
-        cover_path, back_cover_path = self.find_cover_files(input_directory)
+        # Find or create cover files
+        cover_path, back_cover_path = self.find_or_create_cover_files(input_directory)
         
-        if cover_path:
-            print(f"✓ Found cover: {cover_path.name}")
-        else:
-            print("⚠ Cover file (cover.pdf) not found")
-        
-        if back_cover_path:
-            print(f"✓ Found back cover: {back_cover_path.name}")
-        else:
-            print("⚠ Back cover file (back_cover.pdf) not found")
-        
-        # Get inner pages
-        inner_pages = self.get_inner_pages(input_directory, sort_by)
+        # Get all files (converting JPGs to PDFs as needed)
+        inner_pages = self.get_all_files(input_directory, sort_by)
         
         if not inner_pages:
-            print("⚠ No inner page PDF files found")
+            print("⚠ No inner page files found")
             if not cover_path and not back_cover_path:
-                print("✗ No PDF files found in directory")
+                print("✗ No files found in directory")
                 return False
         
         print(f"✓ Found {len(inner_pages)} inner page files")
@@ -275,6 +326,14 @@ class PDFCatalogMerger:
         if self.merge_pdfs(pdf_order, output_path):
             print(f"\n✓ Catalog created successfully: {output_path}")
             print(f"Total pages: {len(pdf_order)} files merged")
+            
+            # Clean up temp files
+            temp_dir = input_directory / "_temp_pdfs"
+            if temp_dir.exists():
+                import shutil
+                shutil.rmtree(temp_dir)
+                print("✓ Cleaned up temporary files")
+            
             return True
         else:
             return False
@@ -283,25 +342,25 @@ class PDFCatalogMerger:
 def main():
     """Main function to handle command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Merge PDF files into a catalog with cover and back cover",
+        description="Enhanced catalog creator with JPG conversion and PDF merging",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Create catalog from current directory (sorted by name)
-  python pdf_catalog_merger.py
+  python enhanced_catalog_merger.py
   
   # Create catalog from specific directory (sorted by creation date)
-  python pdf_catalog_merger.py -d /path/to/pdfs -s date -o catalog.pdf
+  python enhanced_catalog_merger.py -d /path/to/images -s date -o catalog.pdf
   
   # Create catalog with custom output name
-  python pdf_catalog_merger.py -d documents -o my_catalog.pdf
+  python enhanced_catalog_merger.py -d images -o my_catalog.pdf
         """
     )
     
     parser.add_argument("-d", "--directory", type=str, default=".",
-                        help="Input directory containing PDF files (default: current directory)")
-    parser.add_argument("-o", "--output", type=str, default="catalog.pdf",
-                        help="Output catalog filename (default: catalog.pdf)")
+                        help="Input directory containing image/PDF files (default: current directory)")
+    parser.add_argument("-o", "--output", type=str, default="enhanced_catalog.pdf",
+                        help="Output catalog filename (default: enhanced_catalog.pdf)")
     parser.add_argument("-s", "--sort", type=str, choices=["name", "date"],
                         default="name", help="Sort inner pages by 'name' or 'date' (default: name)")
     
@@ -319,7 +378,7 @@ Examples:
     
     # Create merger and process
     try:
-        merger = PDFCatalogMerger()
+        merger = EnhancedCatalogMerger()
         success = merger.create_catalog(
             input_directory=input_dir,
             output_file=args.output,
@@ -327,9 +386,9 @@ Examples:
         )
         
         if success:
-            print("\n🎉 Catalog creation completed successfully!")
+            print("\n🎉 Enhanced catalog creation completed successfully!")
         else:
-            print("\n❌ Catalog creation failed!")
+            print("\n❌ Enhanced catalog creation failed!")
             sys.exit(1)
             
     except KeyboardInterrupt:
