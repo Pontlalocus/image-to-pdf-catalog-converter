@@ -5,6 +5,7 @@ Working fix for blank page issue - direct approach
 
 import os
 import sys
+import io
 from pathlib import Path
 from typing import List, Optional, Tuple
 import argparse
@@ -14,6 +15,11 @@ from datetime import datetime
 import warnings
 with warnings.catch_warnings():
     from PyPDF2 import PdfReader, PdfWriter
+
+try:
+    import pikepdf
+except Exception:
+    pikepdf = None
 
 try:
     from PIL import Image, ImageOps
@@ -144,8 +150,7 @@ class WorkingFixPDFCatalogMerger:
             page = writer.add_blank_page(width=self.page_width, height=self.page_height)
             
             # Convert image to bytes
-            import tempfile
-            img_bytes = tempfile.BytesIO()
+            img_bytes = io.BytesIO()
             img.save(img_bytes, format='PNG')
             
             # Add image to the page
@@ -236,6 +241,7 @@ class WorkingFixPDFCatalogMerger:
             
             # Write merged PDF
             try:
+                print(f"⚠ Saving merged PDF to: {output_path} (this can take several minutes depending on the number of pages and file sizes)...")
                 with open(output_path, 'wb') as output_file:
                     writer.write(output_file)
                 
@@ -255,19 +261,69 @@ class WorkingFixPDFCatalogMerger:
         except Exception as e:
             print(f"✗ Error merging PDFs: {e}")
             return False
+
+    def merge_pdfs_pikepdf(self, pdf_paths: List[Path], output_path: Path) -> bool:
+        if pikepdf is None:
+            print("✗ pikepdf is not installed. Install with: pip install pikepdf")
+            return False
+
+        merged = pikepdf.Pdf.new()
+
+        for idx, pdf_path in enumerate(pdf_paths, start=1):
+            print(f"[{idx}/{len(pdf_paths)}] Adding: {pdf_path.name}")
+            try:
+                with pikepdf.Pdf.open(str(pdf_path)) as part:
+                    merged.pages.extend(part.pages)
+            except Exception as e:
+                # Fallback: try to rewrite/sanitize this single PDF, then re-open
+                try:
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                        tmp_path = Path(tmp.name)
+                    try:
+                        with pikepdf.Pdf.open(str(pdf_path)) as src:
+                            src.save(str(tmp_path))
+                        with pikepdf.Pdf.open(str(tmp_path)) as part:
+                            merged.pages.extend(part.pages)
+                    finally:
+                        try:
+                            tmp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                except Exception as e2:
+                    print(f"✗ Error adding {pdf_path.name} with pikepdf: {e}")
+                    print(f"✗ Fallback sanitize also failed for {pdf_path.name}: {e2}")
+                    return False
+
+        # Save once at the end (linearize can take time on large files)
+        print(f"⚠ Saving merged PDF to: {output_path} (this can take several minutes depending on the number of pages and file sizes)...")
+        merged.save(str(output_path), linearize=True)
+        return output_path.exists() and output_path.stat().st_size > 0
     
     def create_catalog(self, input_directory: Path, output_file: str, 
-                      sort_by: str = "name") -> bool:
+                      sort_by: str = "name", engine: str = "auto") -> bool:
         """Create a catalog by converting images and merging PDFs."""
         print(f"Creating WORKING catalog from: {input_directory}")
         print(f"Sorting inner pages by: {sort_by}")
+        print(f"Merge engine: {engine}")
         print("-" * 50)
+
+        # Create output path early so we can exclude it from inputs
+        output_path = input_directory / output_file if not Path(output_file).is_absolute() else Path(output_file)
         
         # Find cover files
         cover_path, back_cover_path = self.find_cover_files(input_directory)
         
         # Get all files (converting JPGs to PDFs with working method)
         inner_pages = self.get_all_files_working(input_directory, sort_by)
+
+        # Avoid recursively merging previously-created catalogs
+        excluded_pdf_names = {
+            "working_catalog.pdf",
+            "catalog.pdf",
+            output_path.name.lower(),
+        }
+        inner_pages = [p for p in inner_pages if p.name.lower() not in excluded_pdf_names]
         
         if not inner_pages:
             print("⚠ No inner page files found")
@@ -291,16 +347,22 @@ class WorkingFixPDFCatalogMerger:
         if back_cover_path:
             pdf_order.append(back_cover_path)
         
-        print(f"\\nMerging {len(pdf_order)} files...")
+        print(f"\nMerging {len(pdf_order)} files...")
         
-        # Create output path
-        output_path = input_directory / output_file if not Path(output_file).is_absolute() else Path(output_file)
-        
-        # Merge PDFs
-        if self.merge_pdfs(pdf_order, output_path):
-            print(f"\\n✓ WORKING Catalog created successfully: {output_path}")
+        selected_engine = engine
+        if selected_engine == "auto":
+            selected_engine = "pikepdf" if pikepdf is not None else "pypdf2"
+
+        merged_ok = False
+        if selected_engine == "pikepdf":
+            merged_ok = self.merge_pdfs_pikepdf(pdf_order, output_path)
+        else:
+            merged_ok = self.merge_pdfs(pdf_order, output_path)
+
+        if merged_ok:
+            print(f"\n✓ WORKING Catalog created successfully: {output_path}")
             print(f"Total pages: {len(pdf_order)} files merged")
-            print("✅ Black page issue RESOLVED with PyPDF2!")
+            print("✅ Catalog created!")
             
             # Clean up temp files
             temp_dir = input_directory / "_temp_pdfs_working"
@@ -334,10 +396,13 @@ Examples:
     
     parser.add_argument("-d", "--directory", type=str, default=".",
                         help="Input directory containing image/PDF files (default: current directory)")
-    parser.add_argument("-o", "--output", type=str, default="working_catalog.pdf",
-                        help="Output catalog filename (default: working_catalog.pdf)")
+    parser.add_argument("-o", "--output", type=str, default="Catalog.pdf",
+                        help="Output catalog filename (default: Catalog.pdf)")
     parser.add_argument("-s", "--sort", type=str, choices=["name", "date"],
                         default="name", help="Sort inner pages by 'name' or 'date' (default: name)")
+
+    parser.add_argument("--engine", type=str, choices=["auto", "pypdf2", "pikepdf"], default="auto",
+                        help="Merge engine: auto prefers pikepdf if installed (default: auto)")
     
     args = parser.parse_args()
     
@@ -357,7 +422,8 @@ Examples:
         success = merger.create_catalog(
             input_directory=input_dir,
             output_file=args.output,
-            sort_by=args.sort
+            sort_by=args.sort,
+            engine=args.engine
         )
         
         if success:
